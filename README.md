@@ -54,7 +54,7 @@ When designing a system that handles patient calls, compliance and safety are cr
 ---
 
 ## 📂 Deliverables
-- A **short document (3–4 pages)** or a **GitHub repo** containing:  
+- A pull request to this **GitHub repo** containing:  
   - Architecture diagram (flow from GHL → AI voice pipeline → GHL update).  
   - Code snippets (Node.js, Python, or your preferred language).  
   - Notes on compliance and design decisions.  
