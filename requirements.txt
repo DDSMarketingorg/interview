@@ -1,0 +1,28 @@
+# Core FastAPI and web framework
+fastapi>=0.115.12,<0.116.0
+uvicorn[standard]>=0.32.1,<0.33.0
+pydantic[email]>=2.10.4,<2.11.0
+python-multipart>=0.0.18,<0.1.0
+python-dotenv>=1.0.1,<2.0.0
+
+# HTTP client and async support
+aiohttp>=3.10.5,<4.0.0
+aiofiles>=24.1.0,<25.0.0
+websockets>=14.1,<15.0
+
+# AI and external service integrations
+openai>=1.68.0,<2.0.0
+twilio>=8.8.0,<9.0.0
+boto3>=1.35.67,<2.0.0
+
+# Database support (PostgreSQL)
+sqlalchemy>=2.0.36,<2.1.0
+alembic>=1.14.0,<2.0.0
+psycopg2-binary>=2.9.10,<3.0.0
+
+# Security and authentication
+cryptography>=43.0.3,<44.0.0
+python-jose[cryptography]>=3.3.0,<4.0.0
+
+# Development and production
+setuptools>=75.0.0

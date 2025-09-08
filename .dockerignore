@@ -1,0 +1,54 @@
+# Docker ignore file for AI Voice Assistant
+
+# Git
+.git
+.gitignore
+README.md
+docs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing
+test_*.py
+*_test.py
+test_results.json
+TEST_RESULTS.md
+
+# Development
+.env
+.env.local
+.env.development
+.env.test
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile*
+docker-compose*
+docker-test.sh
+
+# Documentation
+docs/
+*.md
+!requirements.txt
