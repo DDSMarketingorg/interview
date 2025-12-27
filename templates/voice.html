@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Voice Agent Demo</title>
+
+  <style>
+    body {
+      margin: 0;
+      height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+    }
+
+    .container {
+      background: rgba(0, 0, 0, 0.4);
+      padding: 32px 40px;
+      border-radius: 16px;
+      width: 360px;
+      text-align: center;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+    }
+
+    h2 {
+      margin-top: 0;
+      margin-bottom: 20px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+
+    #startBtn {
+      background: #00e5ff;
+      color: #00343d;
+      border: none;
+      padding: 14px 22px;
+      font-size: 16px;
+      border-radius: 50px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      box-shadow: 0 6px 16px rgba(0, 229, 255, 0.4);
+    }
+
+    #startBtn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 22px rgba(0, 229, 255, 0.55);
+    }
+
+    #startBtn:active {
+      transform: translateY(0);
+      box-shadow: 0 6px 16px rgba(0, 229, 255, 0.4);
+    }
+
+    #status {
+      margin-top: 20px;
+      min-height: 24px;
+      font-size: 14px;
+      opacity: 0.9;
+    }
+
+    .hint {
+      margin-top: 16px;
+      font-size: 12px;
+      opacity: 0.6;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="container">
+    <h2>🤖 AI Voice Agent</h2>
+
+    <button id="startBtn">🎤 Start talking</button>
+
+    <p id="status"></p>
+
+    <div class="hint">
+      Click the button and speak naturally
+    </div>
+  </div>
+
+  <!-- Socket.IO client -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+  <script>
+    const socket = io("http://localhost:5000");
+
+    const statusEl = document.getElementById("status");
+
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      alert("Google Web Speech API not supported in this browser");
+    }
+
+    const recognition = new SpeechRecognition();
+
+    recognition.lang = "en-US";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognition.onstart = () => {
+      statusEl.innerText = "🎙️ Listening...";
+    };
+
+    recognition.onresult = (event) => {
+      const text = event.results[0][0].transcript.trim();
+      console.log("User said:", text);
+      statusEl.innerText = "📝 " + text;
+      socket.emit("user_text", { text });
+    };
+
+    recognition.onerror = (event) => {
+      console.error("STT error:", event.error);
+      statusEl.innerText = "❌ STT error: " + event.error;
+    };
+
+    recognition.onend = () => {
+      statusEl.innerText += " (done)";
+    };
+
+    document.getElementById("startBtn").onclick = () => {
+      recognition.start();
+    };
+
+    socket.on("ai_text", (data) => {
+      console.log("AI says:", data.text);
+      const utterance = new SpeechSynthesisUtterance(data.text);
+      utterance.lang = "en-US";
+      speechSynthesis.speak(utterance);
+    });
+  </script>
+
+</body>
+</html>
