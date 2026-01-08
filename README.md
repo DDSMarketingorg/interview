@@ -34,8 +34,10 @@ Provide working or pseudocode for:
     "insurance": "Sun Life",
     "preferred_slot": "2025-09-07 15:30"
   }
-- 	•	Writing results back to GHL (appointment or note)
-- 	### 3. Compliance
+  ```
+- Writing results back to GHL (appointment or note)
+
+### 3. Compliance
 When designing a system that handles patient calls, compliance and safety are critical. In your solution, explain how you would address:  
 
 - **Do Not Disturb (DND) / Do Not Call (DNC)**  
@@ -94,6 +96,8 @@ When designing a system that handles patient calls, compliance and safety are cr
     "email": "sarah@example.com"
   }
 }
+```
+
 ### Example Twilio Outbound Call (Node.js)
 ```js
 import twilio from "twilio";
@@ -125,3 +129,4 @@ async function makeCall(toNumber, greeting) {
 
 // Example usage
 makeCall("+1416xxxxxxx", "Hello Sarah, this is Nova Dentistry calling about your appointment request.");
+```
