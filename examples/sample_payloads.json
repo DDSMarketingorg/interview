@@ -1,0 +1,76 @@
+{
+    "contact_created": {
+        "event": "contact.created",
+        "contact": {
+            "id": "CNT_abc123xyz",
+            "firstName": "Sarah",
+            "lastName": "Johnson",
+            "phone": "+14165551234",
+            "email": "sarah.johnson@example.com",
+            "tags": [
+                "new_lead",
+                "website_form"
+            ],
+            "dndSettings": {
+                "all": false,
+                "phone": false,
+                "sms": false,
+                "email": false
+            },
+            "customFields": {
+                "referral_source": "Google Search"
+            }
+        },
+        "locationId": "LOC_dental123",
+        "timestamp": "2025-01-07T10:30:00Z"
+    },
+    "contact_with_dnd": {
+        "event": "contact.created",
+        "contact": {
+            "id": "CNT_dnd456",
+            "firstName": "John",
+            "lastName": "Doe",
+            "phone": "+14165559999",
+            "email": "john.doe@example.com",
+            "dndSettings": {
+                "all": false,
+                "phone": true,
+                "sms": false,
+                "email": false
+            }
+        },
+        "locationId": "LOC_dental123"
+    },
+    "contact_minimal": {
+        "event": "contact.created",
+        "contact": {
+            "id": "CNT_minimal789",
+            "firstName": "Quick",
+            "phone": "+14165557777"
+        }
+    },
+    "contact_no_phone": {
+        "event": "contact.created",
+        "contact": {
+            "id": "CNT_nophone",
+            "firstName": "NoPhone",
+            "lastName": "User",
+            "email": "nophone@example.com"
+        }
+    },
+    "twilio_call_status_completed": {
+        "CallSid": "CA1234567890abcdef",
+        "CallStatus": "completed",
+        "CallDuration": "180",
+        "Direction": "outbound-api",
+        "From": "+15551234567",
+        "To": "+14165551234",
+        "Timestamp": "2025-01-07T10:35:00Z"
+    },
+    "twilio_speech_result": {
+        "CallSid": "CA1234567890abcdef",
+        "SpeechResult": "Yes, I have Sun Life insurance through my employer.",
+        "Confidence": "0.95",
+        "Language": "en-US"
+    }
+}

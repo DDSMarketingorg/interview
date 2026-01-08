@@ -1,0 +1,7 @@
+[project]
+name = "voice-assistant"
+version = "0.1.0"
+description = "AI-powered voice assistant for dental lead qualification"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
