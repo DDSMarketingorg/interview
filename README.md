@@ -1,5 +1,58 @@
 # AI Voice Assistant – Interview Assignment
 
+## Solution
+
+This is a fully working Node.js + TypeScript backend. It is not pseudocode.
+
+**Stack:** Express · Twilio Media Streams · OpenAI Whisper (STT) · GPT-4o via Vercel AI SDK · ElevenLabs (TTS) · Postgres + TypeORM · Docker
+
+**Docs:**
+- [`docs/architecture.md`](docs/architecture.md) — Mermaid flow diagram, Clean Architecture layers, key technical decisions
+- [`docs/compliance.md`](docs/compliance.md) — HIPAA, TCPA, OSHA implementation details and BAA requirements
+- [`docs/example-conversations.md`](docs/example-conversations.md) — Happy path and emergency escalation transcripts with tool calls annotated
+
+### Running locally
+
+```bash
+# 1. Start Postgres
+docker-compose up -d
+
+# 2. Install dependencies
+npm install
+
+# 3. Configure environment
+cp .env.example .env   # fill in real API keys
+
+# 4. Run migrations (creates all 6 tables)
+npm run migration:run
+
+# 5. Start the dev server
+npm run dev
+# → Server on :3000  |  Webhook: POST /webhooks/ghl  |  Voice WS: /voice/stream
+```
+
+### Running in production simulation
+
+```bash
+cp .env.example .env  # fill in real values
+docker-compose -f docker-compose.prod.yml up -d --build
+```
+
+### Testing the webhook
+
+```bash
+# Build a valid HMAC-SHA256 signature
+PAYLOAD='{"event":"contact.created","contact":{"id":"CNT_001","firstName":"Sarah","phone":"+14165550001","email":"sarah@example.com"}}'
+SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$GHL_WEBHOOK_SECRET" -hex | awk '{print $2}')
+
+curl -X POST http://localhost:3000/webhooks/ghl \
+  -H "Content-Type: application/json" \
+  -H "x-ghl-signature: $SIG" \
+  -d "$PAYLOAD"
+```
+
+---
+
 ## 📌 Project Overview
 Design a mini system for a **dental marketing AI voice assistant** that integrates with **GoHighLevel (GHL)**.  
 The system should:  

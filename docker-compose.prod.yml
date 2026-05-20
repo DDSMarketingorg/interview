@@ -1,0 +1,74 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production simulation — two containers on an isolated bridge network.
+#   • db:  Postgres — NOT exposed to the host (internal network only)
+#   • app: Built from Dockerfile — waits for db health check before starting
+# ─────────────────────────────────────────────────────────────────────────────
+version: '3.9'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: dental_db_prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+    networks:
+      - dental_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # No `ports` mapping — database is unreachable from outside the Docker network.
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: dental_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy  # Wait for Postgres readiness probe before starting
+    environment:
+      NODE_ENV: production
+      # App connects to db via internal Docker hostname — never via localhost
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+      PORT: 3000
+      HOST: ${HOST}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      TWILIO_NUMBER: ${TWILIO_NUMBER}
+      GHL_WEBHOOK_SECRET: ${GHL_WEBHOOK_SECRET}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
+      ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID}
+      GHL_API_KEY: ${GHL_API_KEY}
+      GHL_LOCATION_ID: ${GHL_LOCATION_ID}
+      GHL_CALENDAR_ID: ${GHL_CALENDAR_ID}
+    ports:
+      - "3000:3000"   # Expose app to host / reverse-proxy (nginx, Caddy, etc.)
+    networks:
+      - dental_net
+
+networks:
+  dental_net:
+    driver: bridge    # Isolated — only app and db can communicate on this network
+
+volumes:
+  pgdata_prod:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Usage:
+#   cp .env.example .env && vim .env   # fill in real credentials
+#   docker-compose -f docker-compose.prod.yml up -d --build
+#   docker-compose -f docker-compose.prod.yml exec app \
+#     node -e "require('./dist/infrastructure/database/typeorm/dataSource').AppDataSource
+#              .initialize().then(ds => ds.runMigrations())"
+#   docker-compose -f docker-compose.prod.yml logs -f app
+# ─────────────────────────────────────────────────────────────────────────────
