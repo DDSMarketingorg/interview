@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Local development — Postgres only.
+# The application runs natively on the host with `npm run dev`.
+# ─────────────────────────────────────────────────────────────────────────────
+version: '3.9'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: dental_db_dev
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dental}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      POSTGRES_DB: ${POSTGRES_DB:-dental_ai}
+    ports:
+      - "5434:5432"      # 5434 on host → 5432 in container (avoids conflicts with other local DBs)
+    volumes:
+      - pgdata_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dental}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata_dev:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Usage:
+#   docker-compose up -d           # start Postgres
+#   cp .env.example .env && vim .env
+#   npm run migration:run           # apply schema
+#   npm run dev                     # start app on host
+#   docker-compose down             # stop
+# ─────────────────────────────────────────────────────────────────────────────

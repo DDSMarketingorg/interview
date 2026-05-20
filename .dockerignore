@@ -1,0 +1,29 @@
+# Never send to Docker build context
+
+# Dependencies — reinstalled inside the image via npm ci
+node_modules/
+
+# Compiled output — rebuilt inside the image via tsc
+dist/
+
+# Environment files — secrets injected at runtime via env vars, never baked in
+.env
+.env.*
+
+# Git history — not needed in the image
+.git/
+.gitignore
+
+# Local dev compose files — not relevant inside the container
+docker-compose*.yml
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# OS / IDE noise
+.DS_Store
+.vscode/
+.idea/
