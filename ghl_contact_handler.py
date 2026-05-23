@@ -42,3 +42,14 @@ async def handle_ghl_contact(request: GHLContactRequest, background_tasks: Backg
     background_tasks.add_task(make_twilio_call)
 
     return GHLContactResponse(contact_status="contacting", contact_id=request.contact.id)
+
+
+@app.websocket('/media-stream')
+async def handle_twilio_openai_stream(twilio_ws: WebSocket):
+    print("handle_twilio_openai_stream")
+    await twilio_ws.accept()
+
+    while True:
+        msg = await twilio_ws.receive_text()
+        print("message: ", msg)
+        await twilio_ws.send_text("Hello")
