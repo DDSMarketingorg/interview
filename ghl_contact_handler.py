@@ -1,7 +1,9 @@
 import os
 import json
+import base64
 import asyncio
 from fastapi import FastAPI, BackgroundTasks, WebSocket
+from fastapi.websockets import WebSocketDisconnect
 import websockets
 from twilio.rest import Client
 from pydantic import BaseModel
@@ -47,7 +49,6 @@ async def handle_ghl_contact(request: GHLContactRequest, background_tasks: Backg
 
     return GHLContactResponse(contact_status="contacting", contact_id=request.contact.id)
 
-
 @app.websocket('/media-stream')
 async def handle_twilio_openai_stream(twilio_ws: WebSocket):
     print("handle_twilio_openai_stream")
@@ -63,17 +64,85 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
         await initialize_openai_realtime_session(openai_ws)
         await send_initial_openai_conversation_item(openai_ws)
 
-        
+        stream_sid = None
 
+        # Repurposed from Twilio Guide
+        async def receive_from_twilio():
+            """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
 
+            nonlocal stream_sid
+            try:
+                async for message in twilio_ws.iter_text():
+                    data = json.loads(message)
+
+                    #translate twilio server event to openai client event
+                    if data['event'] == 'media' and openai_ws.state.name == 'OPEN':
+                        audio_append = {
+                            "type": "input_audio_buffer.append",
+                            "audio": data['media']['payload']
+                        }
+                        await openai_ws.send(json.dumps(audio_append))
+                    elif data['event'] == 'start':
+                        stream_sid = data['start']['streamSid']
+            except WebSocketDisconnect:
+                print("Client disconnected.")
+                if openai_ws.state.name == 'OPEN':
+                    await openai_ws.close()
+
+        # Repurposed from Twilio Guide
+        async def receive_from_openai():
+            """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
+            nonlocal stream_sid
+            try:
+                async for openai_message in openai_ws:
+                    response = json.loads(openai_message)
+
+                    #translate openai server event to twilio client event
+                    if response['type'] == 'response.output_audio.delta' and response.get('delta'):
+                        try:
+                            audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
+                            audio_delta = {
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {
+                                    "payload": audio_payload
+                                }
+                            }
+                            await twilio_ws.send_json(audio_delta)
+                        except Exception as e:
+                            print(f"Error processing audio data: {e}")
+            except Exception as e:
+                print(f"Error in send_to_twilio: {e}")
+                
+        await asyncio.gather(receive_from_twilio(), receive_from_openai())
 
 async def initialize_openai_realtime_session(openai_ws):
-    system_message = (
-        "You are a helpful AI assistant who loves to chat about "
-        "anything the user is interested in and is prepared to offer them facts. "
-        "You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. "
-        "Always stay positive, but work in a joke when appropriate."
-    )
+    practice_name = "Nova Dentistry"  
+    system_message = f"""You are a professional AI scheduling assistant calling on behalf of {practice_name}, a dental office. You're speaking with someone who recently submitted a request for a dental appointment. Your job is to qualify the lead and help book a visit.
+
+    Identity & disclosure:
+    - You are an AI assistant. Make that clear in your greeting, and again if asked.
+
+    Your goals, in order:
+    1. Confirm you're speaking with the right person.
+    2. Briefly reference that they requested an appointment.
+    3. Collect: reason for the visit, pain level on a 1-to-10 scale, whether they have dental insurance (and the provider if so), and a preferred day/time.
+    4. Offer to book an appointment and confirm the details back to them.
+
+    Using tools:
+    - Use your tools to record the caller's details and to check or book appointment times. Call the qualification tool once you have the information rather than only talking about it.
+
+    Safety & escalation (important):
+    - You are NOT a medical professional. Never diagnose, never give clinical or treatment advice, never recommend medication.
+    - If the caller describes a possible emergency — severe pain, facial swelling, fever, trauma, uncontrolled bleeding, or signs of infection — respond with empathy, do NOT advise treatment, and immediately escalate to a human using the escalation tool / advise them to contact the office or emergency services.
+
+    Conversation style (this is a live phone call):
+    - Keep replies short and natural. Ask one question at a time. Never read lists or formatting aloud.
+    - Be warm, efficient, and respectful of their time.
+    - Collect only what's needed to schedule. Do not ask for full medical history, SSN, or payment details.
+    - If it's a bad time, offer to reschedule the call. If they ask not to be called again, acknowledge it, stop, and don't push. If they're not interested, thank them and end politely.
+    - If you can't handle something, offer to have a human from the office follow up.
+    """
 
     session_update = {
         "type": "session.update",
@@ -98,6 +167,9 @@ async def initialize_openai_realtime_session(openai_ws):
     await openai_ws.send(json.dumps(session_update))
 
 async def send_initial_openai_conversation_item(openai_ws):
+    practice_name = "Nova Dentistry"
+    contact_name = "Sarah"
+
     """Send initial conversation so AI talks first."""
     initial_conversation_item = {
         "type": "conversation.item.create",
@@ -108,10 +180,12 @@ async def send_initial_openai_conversation_item(openai_ws):
                 {
                     "type": "input_text",
                     "text": (
-                        "Greet the user with 'Hello there! I am an AI voice assistant powered by "
-                        "Twilio and the OpenAI Realtime API. You can ask me for facts, jokes, or "
-                        "anything you can imagine. How can I help you?'"
-                    )
+                    f"The call has just connected. Open the conversation: greet {contact_name} warmly, "
+                    f"introduce yourself as an automated AI scheduling assistant calling on behalf of "
+                    f"{practice_name} about the dental appointment request they recently submitted, and "
+                    f"confirm you're speaking with {contact_name}. Keep it to one or two short, friendly "
+                    f"sentences, then stop and wait for their reply."
+                )
                 }
             ]
         }
