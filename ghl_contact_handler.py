@@ -21,11 +21,14 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 app = FastAPI(title="AI Voice Assistant")
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
+active_calls: dict[str, dict] = {}
+
 class GHLContact(BaseModel):
     id: str
     firstName: str
     phone: str
     email: str
+    practiceName: str
 
 class GHLContactRequest(BaseModel):
     event: str
@@ -35,8 +38,24 @@ class GHLContactResponse(BaseModel):
     contact_status: str
     contact_id: str
 
-def make_twilio_call():
-    print("making call...")
+def make_twilio_call(contact: GHLContact):
+    practice_name = contact.practiceName
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://{DOMAIN}/media-stream" />
+  </Connect>
+</Response>"""
+
+    call = twilio_client.calls.create(
+        to=contact.phone,
+        from_=TWILIO_PHONE_NUMBER,
+        twiml=twiml,
+    )
+
+    active_calls[call.sid] = contact
+
+    print(f"Call initiated: {call.sid} -> {contact.firstName} at {contact.phone}")
 
 @app.post("/ghl/contact")
 async def handle_ghl_contact(request: GHLContactRequest, background_tasks: BackgroundTasks) -> GHLContactResponse:
@@ -44,8 +63,15 @@ async def handle_ghl_contact(request: GHLContactRequest, background_tasks: Backg
     if request.event != "contact.created":
         return GHLContactResponse(contact_status="ignored", contact_id=request.contact.id)
 
+    # ignore contacts with empty or whitespace data
+    # we need a phone number to call and a practice to book the appointment for
+    if not request.contact.firstName.strip() or \
+       not request.contact.phone.strip() or \
+       not request.contact.practiceName.strip():
+        return GHLContactResponse(contact_status="invalid", contact_id=request.contact.id)
+
     # enqueue twilio call so reach out to contact
-    background_tasks.add_task(make_twilio_call)
+    background_tasks.add_task(make_twilio_call, request.contact)
 
     return GHLContactResponse(contact_status="contacting", contact_id=request.contact.id)
 
@@ -61,35 +87,37 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
             "Authorization": f"Bearer {OPENAI_API_KEY}"
         }
     ) as openai_ws:
-        await initialize_openai_realtime_session(openai_ws)
-        await send_initial_openai_conversation_item(openai_ws)
-
         stream_sid = None
+        call_sid = None
 
-        # Repurposed from Twilio Guide
         async def receive_from_twilio():
             """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
-
-            nonlocal stream_sid
+            nonlocal stream_sid, call_sid
             try:
                 async for message in twilio_ws.iter_text():
                     data = json.loads(message)
 
-                    #translate twilio server event to openai client event
-                    if data['event'] == 'media' and openai_ws.state.name == 'OPEN':
+                    if data['event'] == 'start':
+                        stream_sid = data['start']['streamSid']
+                        call_sid = data['start'].get('callSid')
+                        if call_sid and call_sid in active_calls:
+                            contact = active_calls[call_sid]
+                            await initialize_openai_realtime_session(openai_ws, contact)
+                            await send_initial_openai_conversation_item(openai_ws, contact)
+                    elif data['event'] == 'media' and openai_ws.state.name == 'OPEN':
                         audio_append = {
                             "type": "input_audio_buffer.append",
                             "audio": data['media']['payload']
                         }
                         await openai_ws.send(json.dumps(audio_append))
-                    elif data['event'] == 'start':
-                        stream_sid = data['start']['streamSid']
             except WebSocketDisconnect:
                 print("Client disconnected.")
                 if openai_ws.state.name == 'OPEN':
                     await openai_ws.close()
+            finally:
+                if call_sid:
+                    active_calls.pop(call_sid, None)
 
-        # Repurposed from Twilio Guide
         async def receive_from_openai():
             """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
             nonlocal stream_sid
@@ -116,9 +144,8 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                 
         await asyncio.gather(receive_from_twilio(), receive_from_openai())
 
-async def initialize_openai_realtime_session(openai_ws):
-    practice_name = "Nova Dentistry"  
-    system_message = f"""You are a professional AI scheduling assistant calling on behalf of {practice_name}, a dental office. You're speaking with someone who recently submitted a request for a dental appointment. Your job is to qualify the lead and help book a visit.
+async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
+    system_message = f"""You are a professional AI scheduling assistant calling on behalf of {contact.practiceName}, a dental office. You're speaking with someone who recently submitted a request for a dental appointment. Your job is to qualify the lead and help book a visit.
 
     Identity & disclosure:
     - You are an AI assistant. Make that clear in your greeting, and again if asked.
@@ -166,10 +193,7 @@ async def initialize_openai_realtime_session(openai_ws):
 
     await openai_ws.send(json.dumps(session_update))
 
-async def send_initial_openai_conversation_item(openai_ws):
-    practice_name = "Nova Dentistry"
-    contact_name = "Sarah"
-
+async def send_initial_openai_conversation_item(openai_ws, contact: GHLContact):
     """Send initial conversation so AI talks first."""
     initial_conversation_item = {
         "type": "conversation.item.create",
@@ -180,10 +204,10 @@ async def send_initial_openai_conversation_item(openai_ws):
                 {
                     "type": "input_text",
                     "text": (
-                    f"The call has just connected. Open the conversation: greet {contact_name} warmly, "
+                    f"The call has just connected. Open the conversation: greet {contact.firstName} warmly, "
                     f"introduce yourself as an automated AI scheduling assistant calling on behalf of "
-                    f"{practice_name} about the dental appointment request they recently submitted, and "
-                    f"confirm you're speaking with {contact_name}. Keep it to one or two short, friendly "
+                    f"{contact.practiceName} about the dental appointment request they recently submitted, and "
+                    f"confirm you're speaking with {contact.firstName}. Keep it to one or two short, friendly "
                     f"sentences, then stop and wait for their reply."
                 )
                 }
