@@ -20,7 +20,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI(title="AI Voice Assistant")
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
 active_calls: dict[str, dict] = {}
 
 class GHLContact(BaseModel):
@@ -146,6 +145,21 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                         except json.JSONDecodeError:
                             arguments = {}
                         result = handle_tool_call(name, arguments, contact)
+
+                        if result.get("end_call"):
+                            await openai_ws.send(json.dumps({
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": json.dumps({"acknowledged": True})
+                                }
+                            }))
+                            await asyncio.sleep(0.5)
+                            await twilio_ws.close()
+                            await openai_ws.close()
+                            break
+
                         await openai_ws.send(json.dumps({
                             "type": "conversation.item.create",
                             "item": {
@@ -159,47 +173,6 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                 print(f"Error in send_to_twilio: {e}")
                 
         await asyncio.gather(receive_from_twilio(), receive_from_openai())
-
-def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> dict:
-    match name:
-        case "qualify_lead":
-            pain = arguments.get("pain_level", "N/A")
-            insurance = arguments.get("insurance_provider") or "none"
-            reason = arguments.get("reason_for_visit", "N/A")
-            preferred = arguments.get("preferred_day_time", "N/A")
-
-            print(f"[QUALIFY] Contact {contact.id} ({contact.firstName} {contact.phone}): "
-                  f"pain={pain}/10 insurance={insurance} reason='{reason}' preferred='{preferred}'")
-
-            if isinstance(pain, (int, float)) and int(pain) >= 8:
-                return {"escalate": True, "message": "High pain level detected. The office will prioritize this case."}
-
-            return {"status": "recorded", "message": "Your details have been noted. Let me check available appointments."}
-
-        case "schedule_appointment":
-            date_time = arguments.get("date_time", "TBD")
-            print(f"[SCHEDULE] Contact {contact.id} ({contact.firstName}): appointment={date_time}")
-            return {"status": "booked", "confirmation": f"Appointment set for {date_time}. A confirmation will be sent to {contact.email}."}
-
-        case "escalate_emergency":
-            emergency = arguments.get("emergency_type", "not specified")
-            print(f"!!! [911] Contact {contact.id} ({contact.firstName} {contact.phone}) "
-                  f"LIFE-THREATENING EMERGENCY: {emergency}")
-            return {"status": "911", "message": "Stop. This is a medical emergency. Hang up and call 911 immediately. Do not wait."}
-
-        case "escalate_to_human":
-            reason = arguments.get("reason", "not specified")
-            print(f"[ESCALATE] Contact {contact.id} ({contact.firstName} {contact.phone}) "
-                  f"needs human callback. Reason: {reason}")
-            return {"status": "escalated", "message": "Someone from the office will call you back right away to help."}
-
-        case "opt_out":
-            print(f"[DNC] Contact {contact.id} ({contact.firstName} {contact.phone}) requested no further contact")
-            return {"status": "opted_out", "message": "Noted. You will not be contacted again."}
-
-        case _:
-            print(f"[UNKNOWN_TOOL] {name} args={arguments}")
-            return {"status": "unknown_tool", "name": name}
 
 async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
     system_message = f"""You are a professional AI scheduling assistant calling on behalf of {contact.practiceName}, a dental office. You're speaking with someone who recently submitted a request for a dental appointment. Your job is to qualify the lead and help book a visit.
@@ -222,6 +195,13 @@ async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
       1. escalate_emergency: Life-threatening emergencies ONLY — uncontrolled bleeding, physical trauma to the face/mouth, airway obstruction, signs of stroke or heart attack. Tell the caller to hang up and call 911 immediately. Do not wait for a callback.
       2. escalate_to_human: Dental urgency (pain 8-10, swelling with fever, signs of serious infection) OR the caller asks to speak to a person OR the caller is unable to complete the booking process. Calmly let them know someone from the office will reach out to them right away.
     - qualify_lead may return an escalate flag for high pain — read that result and escalate if indicated.
+
+    Ending the call (important):
+    - After telling the caller to call 911 (escalate_emergency), call end_call IMMEDIATELY. Do not say anything else.
+    - After the caller opts out, call end_call immediately.
+    - After escalating to a human, call end_call.
+    - After successfully booking an appointment and confirming details, call end_call.
+    - When the conversation reaches a natural conclusion, call end_call rather than lingering.
 
     Conversation style (this is a live phone call):
     - Keep replies short and natural. Ask one question at a time. Never read lists or formatting aloud.
@@ -308,6 +288,18 @@ async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
                         "type": "object",
                         "properties": {}
                     }
+                },
+                {
+                    "type": "function",
+                    "name": "end_call",
+                    "description": "End the call immediately. Must be called after escalate_emergency (911), after opt_out, after escalate_to_human, after successful booking, or when the conversation is complete.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string", "description": "Why the call is ending"}
+                        },
+                        "required": ["reason"]
+                    }
                 }
             ],
         }
@@ -339,3 +331,48 @@ async def send_initial_openai_conversation_item(openai_ws, contact: GHLContact):
     await openai_ws.send(json.dumps(initial_conversation_item))
     await openai_ws.send(json.dumps({"type": "response.create"}))
     
+def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> dict:
+    match name:
+        case "qualify_lead":
+            pain = arguments.get("pain_level", "N/A")
+            insurance = arguments.get("insurance_provider") or "none"
+            reason = arguments.get("reason_for_visit", "N/A")
+            preferred = arguments.get("preferred_day_time", "N/A")
+
+            print(f"[QUALIFY] Contact {contact.id} ({contact.firstName} {contact.phone}): "
+                  f"pain={pain}/10 insurance={insurance} reason='{reason}' preferred='{preferred}'")
+
+            if isinstance(pain, (int, float)) and int(pain) >= 8:
+                return {"escalate": True, "message": "High pain level detected. The office will prioritize this case."}
+
+            return {"status": "recorded", "message": "Your details have been noted. Let me check available appointments."}
+
+        case "schedule_appointment":
+            date_time = arguments.get("date_time", "TBD")
+            print(f"[SCHEDULE] Contact {contact.id} ({contact.firstName}): appointment={date_time}")
+            return {"status": "booked", "confirmation": f"Appointment set for {date_time}. A confirmation will be sent to {contact.email}."}
+
+        case "escalate_emergency":
+            emergency = arguments.get("emergency_type", "not specified")
+            print(f"!!! [911] Contact {contact.id} ({contact.firstName} {contact.phone}) "
+                  f"LIFE-THREATENING EMERGENCY: {emergency}")
+            return {"status": "911", "message": "Stop. This is a medical emergency. Hang up and call 911 immediately. Do not wait."}
+
+        case "escalate_to_human":
+            reason = arguments.get("reason", "not specified")
+            print(f"[ESCALATE] Contact {contact.id} ({contact.firstName} {contact.phone}) "
+                  f"needs human callback. Reason: {reason}")
+            return {"status": "escalated", "message": "Someone from the office will call you back right away to help."}
+
+        case "opt_out":
+            print(f"[DNC] Contact {contact.id} ({contact.firstName} {contact.phone}) requested no further contact")
+            return {"status": "opted_out", "message": "Noted. You will not be contacted again."}
+
+        case "end_call":
+            reason = arguments.get("reason", "call complete")
+            print(f"[END CALL] Contact {contact.id} ({contact.firstName}): {reason}")
+            return {"end_call": True, "message": "The call is complete. Say a brief goodbye and end the conversation."}
+
+        case _:
+            print(f"[UNKNOWN_TOOL] {name} args={arguments}")
+            return {"status": "unknown_tool", "name": name}
