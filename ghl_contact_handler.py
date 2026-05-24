@@ -41,11 +41,11 @@ class GHLContactResponse(BaseModel):
 def make_twilio_call(contact: GHLContact):
     practice_name = contact.practiceName
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Connect>
-    <Stream url="wss://{DOMAIN}/media-stream" />
-  </Connect>
-</Response>"""
+    <Response>
+        <Connect>
+            <Stream url="wss://{DOMAIN}/media-stream" />
+        </Connect>
+    </Response>"""
 
     call = twilio_client.calls.create(
         to=contact.phone,
@@ -88,11 +88,11 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
         }
     ) as openai_ws:
         stream_sid = None
-        call_sid = None
+        contact = None
 
         async def receive_from_twilio():
             """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
-            nonlocal stream_sid, call_sid
+            nonlocal stream_sid, contact
             try:
                 async for message in twilio_ws.iter_text():
                     data = json.loads(message)
@@ -120,12 +120,11 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
 
         async def receive_from_openai():
             """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
-            nonlocal stream_sid
+            nonlocal stream_sid, contact
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
 
-                    #translate openai server event to twilio client event
                     if response['type'] == 'response.output_audio.delta' and response.get('delta'):
                         try:
                             audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
@@ -139,10 +138,68 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                             await twilio_ws.send_json(audio_delta)
                         except Exception as e:
                             print(f"Error processing audio data: {e}")
+                    elif response['type'] == 'response.function_call_arguments.done':
+                        call_id = response['call_id']
+                        name = response['name']
+                        try:
+                            arguments = json.loads(response['arguments'])
+                        except json.JSONDecodeError:
+                            arguments = {}
+                        result = handle_tool_call(name, arguments, contact)
+                        await openai_ws.send(json.dumps({
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps(result)
+                            }
+                        }))
+                        await openai_ws.send(json.dumps({"type": "response.create"}))
             except Exception as e:
                 print(f"Error in send_to_twilio: {e}")
                 
         await asyncio.gather(receive_from_twilio(), receive_from_openai())
+
+def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> dict:
+    match name:
+        case "qualify_lead":
+            pain = arguments.get("pain_level", "N/A")
+            insurance = arguments.get("insurance_provider") or "none"
+            reason = arguments.get("reason_for_visit", "N/A")
+            preferred = arguments.get("preferred_day_time", "N/A")
+
+            print(f"[QUALIFY] Contact {contact.id} ({contact.firstName} {contact.phone}): "
+                  f"pain={pain}/10 insurance={insurance} reason='{reason}' preferred='{preferred}'")
+
+            if isinstance(pain, (int, float)) and int(pain) >= 8:
+                return {"escalate": True, "message": "High pain level detected. The office will prioritize this case."}
+
+            return {"status": "recorded", "message": "Your details have been noted. Let me check available appointments."}
+
+        case "schedule_appointment":
+            date_time = arguments.get("date_time", "TBD")
+            print(f"[SCHEDULE] Contact {contact.id} ({contact.firstName}): appointment={date_time}")
+            return {"status": "booked", "confirmation": f"Appointment set for {date_time}. A confirmation will be sent to {contact.email}."}
+
+        case "escalate_emergency":
+            emergency = arguments.get("emergency_type", "not specified")
+            print(f"!!! [911] Contact {contact.id} ({contact.firstName} {contact.phone}) "
+                  f"LIFE-THREATENING EMERGENCY: {emergency}")
+            return {"status": "911", "message": "Stop. This is a medical emergency. Hang up and call 911 immediately. Do not wait."}
+
+        case "escalate_to_human":
+            reason = arguments.get("reason", "not specified")
+            print(f"[ESCALATE] Contact {contact.id} ({contact.firstName} {contact.phone}) "
+                  f"needs human callback. Reason: {reason}")
+            return {"status": "escalated", "message": "Someone from the office will call you back right away to help."}
+
+        case "opt_out":
+            print(f"[DNC] Contact {contact.id} ({contact.firstName} {contact.phone}) requested no further contact")
+            return {"status": "opted_out", "message": "Noted. You will not be contacted again."}
+
+        case _:
+            print(f"[UNKNOWN_TOOL] {name} args={arguments}")
+            return {"status": "unknown_tool", "name": name}
 
 async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
     system_message = f"""You are a professional AI scheduling assistant calling on behalf of {contact.practiceName}, a dental office. You're speaking with someone who recently submitted a request for a dental appointment. Your job is to qualify the lead and help book a visit.
@@ -161,7 +218,10 @@ async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
 
     Safety & escalation (important):
     - You are NOT a medical professional. Never diagnose, never give clinical or treatment advice, never recommend medication.
-    - If the caller describes a possible emergency — severe pain, facial swelling, fever, trauma, uncontrolled bleeding, or signs of infection — respond with empathy, do NOT advise treatment, and immediately escalate to a human using the escalation tool / advise them to contact the office or emergency services.
+    - There are two escalation paths. Use the right one:
+      1. escalate_emergency: Life-threatening emergencies ONLY — uncontrolled bleeding, physical trauma to the face/mouth, airway obstruction, signs of stroke or heart attack. Tell the caller to hang up and call 911 immediately. Do not wait for a callback.
+      2. escalate_to_human: Dental urgency (pain 8-10, swelling with fever, signs of serious infection) OR the caller asks to speak to a person OR the caller is unable to complete the booking process. Calmly let them know someone from the office will reach out to them right away.
+    - qualify_lead may return an escalate flag for high pain — read that result and escalate if indicated.
 
     Conversation style (this is a live phone call):
     - Keep replies short and natural. Ask one question at a time. Never read lists or formatting aloud.
@@ -188,6 +248,68 @@ async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
                 }
             },
             "instructions": system_message,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "qualify_lead",
+                    "description": "Record the caller's qualification details once collected — pain level, insurance provider, reason for visit, and preferred day/time. Call this as soon as you have the information rather than only talking about it.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pain_level": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Self-reported pain on a 1-10 scale"},
+                            "insurance_provider": {"type": "string", "description": "Dental insurance provider name, or 'none' if no insurance"},
+                            "reason_for_visit": {"type": "string", "description": "Chief complaint or reason for the dental visit"},
+                            "preferred_day_time": {"type": "string", "description": "Preferred appointment day and time, e.g. 'Monday afternoon'"}
+                        },
+                        "required": ["pain_level", "reason_for_visit"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "schedule_appointment",
+                    "description": "Book an appointment for the caller at the given date and time. Only call after qualification is complete and the caller has agreed to book.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "date_time": {"type": "string", "description": "Confirmed date and time, e.g. '2025-06-15 14:00'"}
+                        },
+                        "required": ["date_time"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "escalate_emergency",
+                    "description": "Caller has a life-threatening emergency — uncontrolled bleeding, trauma, cannot breathe, stroke/heart attack signs. Tell them to call 911 immediately.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "emergency_type": {"type": "string", "description": "Brief description of the life-threatening emergency"}
+                        },
+                        "required": ["emergency_type"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "escalate_to_human",
+                    "description": "Escalate to the dental office for human callback. Use for dental urgency (pain 8+, swelling with fever, infection signs), caller requests a person, or caller cannot complete booking.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string", "description": "Why this needs human follow-up"}
+                        },
+                        "required": ["reason"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "opt_out",
+                    "description": "Caller asked not to be contacted again. Record and stop the conversation politely.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            ],
         }
     }
 
