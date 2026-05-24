@@ -397,7 +397,7 @@ async def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> d
                 f"Phone: {contact.phone} | Email: {contact.email}"
             )
             await add_note(contact.id, note)
-            await update_contact(contact.id, tags=["ai-qualified"])
+            await add_tags(contact.id, ["ai-qualified"])
 
             print(f"[QUALIFY] Contact {contact.id}: "
                   f"pain={pain}/10 insurance={insurance} reason='{reason}' preferred='{preferred}'")
@@ -412,7 +412,7 @@ async def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> d
 
             note = f"AI booked appointment for {contact.firstName}: {date_time}"
             await add_note(contact.id, note)
-            await update_contact(contact.id, tags=["ai-qualified", "appointment-booked"])
+            await add_tags(contact.id, ["ai-qualified", "appointment-booked"])
 
             print(f"[SCHEDULE] Contact {contact.id}: appointment={date_time}")
             return {"status": "booked", "confirmation": f"Appointment set for {date_time}. A confirmation will be sent to {contact.email}."}
@@ -422,7 +422,7 @@ async def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> d
 
             note = f"!!! 911 EMERGENCY during AI call with {contact.firstName} ({contact.phone}): {emergency}"
             await add_note(contact.id, note)
-            await update_contact(contact.id, tags=["ai-escalated-emergency"])
+            await add_tags(contact.id, ["ai-escalated-emergency"])
 
             print(f"!!! [911] Contact {contact.id}: LIFE-THREATENING EMERGENCY")
             return {"status": "911", "message": "Stop. This is a medical emergency. Hang up and call 911 immediately. Do not wait."}
@@ -432,7 +432,7 @@ async def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> d
 
             note = f"AI escalated to human for {contact.firstName} ({contact.phone}). Reason: {reason}"
             await add_note(contact.id, note)
-            await update_contact(contact.id, tags=["ai-escalated-human"])
+            await add_tags(contact.id, ["ai-escalated-human"])
 
             print(f"[ESCALATE] Contact {contact.id}: needs human callback. Reason: {reason}")
             return {"status": "escalated", "message": "Someone from the office will call you back right away to help."}
@@ -440,7 +440,8 @@ async def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> d
         case "opt_out":
             note = f"{contact.firstName} opted out of further contact during AI call."
             await add_note(contact.id, note)
-            await update_contact(contact.id, tags=["ai-opted-out"], dnd=True)
+            await add_tags(contact.id, ["ai-opted-out"])
+            await update_contact(contact.id, dnd=True)
 
             print(f"[DNC] Contact {contact.id}: requested no further contact")
             return {"status": "opted_out", "message": "Noted. You will not be contacted again."}
@@ -464,3 +465,7 @@ async def add_note(contact_id: str, body: str) -> None:
 
 async def update_contact(contact_id: str, **fields) -> None:
     await ghl_request("PUT", f"/contacts/{contact_id}", fields)
+
+
+async def add_tags(contact_id: str, tags: list[str]) -> None:
+    await ghl_request("POST", f"/contacts/{contact_id}/tags", {"tags": tags})
