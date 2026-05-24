@@ -24,7 +24,7 @@ All collected data is stored as a plain-text note on the GHL contact (`ghl_twili
 
 If either is true, the call is skipped and a note is logged.
 
-**During the call** (`ghl_twilio_openai_assistant.py:440-446`): If the caller asks not to be contacted again, the `opt_out` tool sets both `dnd=True` and the `ai-opted-out` tag on their GHL record. A future webhook for the same contact will be blocked by the pre-call check above.
+**During the call** (`ghl_twilio_openai_assistant.py:440-447`): If the caller asks not to be contacted again, the `opt_out` tool sets both `dnd=True` and the `ai-opted-out` tag on their GHL record. A future webhook for the same contact will be blocked by the pre-call check above.
 
 ---
 
