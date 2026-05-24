@@ -7,12 +7,18 @@ from fastapi.websockets import WebSocketDisconnect
 import websockets
 from twilio.rest import Client
 from dotenv import load_dotenv
+import httpx
 from schemas import GHLContact, GHLContactRequest, GHLContactResponse
 
 load_dotenv()
 
 GHL_API_KEY = os.getenv("GHL_API_KEY")
-
+GHL_API_BASE = os.getenv("GHL_API_BASE")
+GHL_HEADERS = {
+    "Authorization": f"Bearer {GHL_API_KEY}",
+    "Version": "2021-07-28",
+    "Content-Type": "application/json",
+}
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -23,25 +29,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 app = FastAPI(title="AI Voice Assistant")
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 active_calls: dict[str, dict] = {}
-
-def make_twilio_call(contact: GHLContact):
-    practice_name = contact.practiceName
-    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-    <Response>
-        <Connect>
-            <Stream url="wss://{DOMAIN}/media-stream" />
-        </Connect>
-    </Response>"""
-
-    call = twilio_client.calls.create(
-        to=contact.phone,
-        from_=TWILIO_PHONE_NUMBER,
-        twiml=twiml,
-    )
-
-    active_calls[call.sid] = contact
-
-    print(f"Call initiated: {call.sid} -> {contact.firstName} at {contact.phone}")
 
 @app.post("/ghl/contact")
 async def handle_ghl_contact(request: GHLContactRequest, background_tasks: BackgroundTasks) -> GHLContactResponse:
@@ -60,6 +47,25 @@ async def handle_ghl_contact(request: GHLContactRequest, background_tasks: Backg
     background_tasks.add_task(make_twilio_call, request.contact)
 
     return GHLContactResponse(contact_status="contacting", contact_id=request.contact.id)
+
+def make_twilio_call(contact: GHLContact):
+    practice_name = contact.practiceName
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+        <Connect>
+            <Stream url="wss://{DOMAIN}/media-stream" />
+        </Connect>
+    </Response>"""
+
+    call = twilio_client.calls.create(
+        to=contact.phone,
+        from_=TWILIO_PHONE_NUMBER,
+        twiml=twiml,
+    )
+
+    active_calls[call.sid] = contact
+
+    print(f"Call initiated: {call.sid}")
 
 @app.websocket('/media-stream')
 async def handle_twilio_openai_stream(twilio_ws: WebSocket):
@@ -133,7 +139,7 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                             arguments = json.loads(response['arguments'])
                         except json.JSONDecodeError:
                             arguments = {}
-                        result = handle_tool_call(name, arguments, contact)
+                        result = await handle_tool_call(name, arguments, contact)
 
                         if result.get("end_call"):
                             await openai_ws.send(json.dumps({
@@ -320,7 +326,7 @@ async def send_initial_openai_conversation_item(openai_ws, contact: GHLContact):
     await openai_ws.send(json.dumps(initial_conversation_item))
     await openai_ws.send(json.dumps({"type": "response.create"}))
     
-def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> dict:
+async def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> dict:
     match name:
         case "qualify_lead":
             pain = arguments.get("pain_level", "N/A")
@@ -328,7 +334,16 @@ def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> dict:
             reason = arguments.get("reason_for_visit", "N/A")
             preferred = arguments.get("preferred_day_time", "N/A")
 
-            print(f"[QUALIFY] Contact {contact.id} ({contact.firstName} {contact.phone}): "
+            note = (
+                f"AI qualification call — {contact.firstName}\n"
+                f"Pain: {pain}/10 | Insurance: {insurance}\n"
+                f"Reason: {reason} | Preferred: {preferred}\n"
+                f"Phone: {contact.phone} | Email: {contact.email}"
+            )
+            await add_note(contact.id, note)
+            await update_contact(contact.id, tags=["ai-qualified"])
+
+            print(f"[QUALIFY] Contact {contact.id}: "
                   f"pain={pain}/10 insurance={insurance} reason='{reason}' preferred='{preferred}'")
 
             if isinstance(pain, (int, float)) and int(pain) >= 8:
@@ -338,30 +353,70 @@ def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> dict:
 
         case "schedule_appointment":
             date_time = arguments.get("date_time", "TBD")
-            print(f"[SCHEDULE] Contact {contact.id} ({contact.firstName}): appointment={date_time}")
+
+            note = f"AI booked appointment for {contact.firstName}: {date_time}"
+            await add_note(contact.id, note)
+            await update_contact(contact.id, tags=["ai-qualified", "appointment-booked"])
+
+            print(f"[SCHEDULE] Contact {contact.id}: appointment={date_time}")
             return {"status": "booked", "confirmation": f"Appointment set for {date_time}. A confirmation will be sent to {contact.email}."}
 
         case "escalate_emergency":
             emergency = arguments.get("emergency_type", "not specified")
-            print(f"!!! [911] Contact {contact.id} ({contact.firstName} {contact.phone}) "
-                  f"LIFE-THREATENING EMERGENCY: {emergency}")
+
+            note = f"!!! 911 EMERGENCY during AI call with {contact.firstName} ({contact.phone}): {emergency}"
+            await add_note(contact.id, note)
+            await update_contact(contact.id, tags=["ai-escalated-emergency"])
+
+            print(f"!!! [911] Contact {contact.id}: LIFE-THREATENING EMERGENCY")
             return {"status": "911", "message": "Stop. This is a medical emergency. Hang up and call 911 immediately. Do not wait."}
 
         case "escalate_to_human":
             reason = arguments.get("reason", "not specified")
-            print(f"[ESCALATE] Contact {contact.id} ({contact.firstName} {contact.phone}) "
-                  f"needs human callback. Reason: {reason}")
+
+            note = f"AI escalated to human for {contact.firstName} ({contact.phone}). Reason: {reason}"
+            await add_note(contact.id, note)
+            await update_contact(contact.id, tags=["ai-escalated-human"])
+
+            print(f"[ESCALATE] Contact {contact.id}: needs human callback. Reason: {reason}")
             return {"status": "escalated", "message": "Someone from the office will call you back right away to help."}
 
         case "opt_out":
-            print(f"[DNC] Contact {contact.id} ({contact.firstName} {contact.phone}) requested no further contact")
+            note = f"{contact.firstName} opted out of further contact during AI call."
+            await add_note(contact.id, note)
+            await update_contact(contact.id, tags=["ai-opted-out"], dnd=True)
+
+            print(f"[DNC] Contact {contact.id}: requested no further contact")
             return {"status": "opted_out", "message": "Noted. You will not be contacted again."}
 
         case "end_call":
             reason = arguments.get("reason", "call complete")
-            print(f"[END CALL] Contact {contact.id} ({contact.firstName}): {reason}")
+
+            note = f"AI call ended for {contact.firstName}. Reason: {reason}"
+            await add_note(contact.id, note)
+
+            print(f"[END CALL] Contact {contact.id}: {reason}")
             return {"end_call": True, "message": "The call is complete. Say a brief goodbye and end the conversation."}
 
         case _:
-            print(f"[UNKNOWN_TOOL] {name} args={arguments}")
+            print(f"[UNKNOWN_TOOL] {name}")
             return {"status": "unknown_tool", "name": name}
+        
+async def ghl_request(method: str, path: str, payload: dict) -> dict | None:
+    try:
+        async with httpx.AsyncClient(
+            base_url=GHL_API_BASE, headers=GHL_HEADERS, timeout=10
+        ) as client:
+            resp = await client.request(method, path, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        print(f"[GHL] {method} {path} failed: {e}")
+        return None
+
+async def add_note(contact_id: str, body: str) -> None:
+    await ghl_request("POST", f"/contacts/{contact_id}/notes", {"body": body})
+
+
+async def update_contact(contact_id: str, **fields) -> None:
+    await ghl_request("PUT", f"/contacts/{contact_id}", fields)
