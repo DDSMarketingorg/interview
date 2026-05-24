@@ -43,13 +43,18 @@ async def handle_ghl_contact(request: GHLContactRequest, background_tasks: Backg
        not request.contact.practiceName.strip():
         return GHLContactResponse(contact_status="invalid", contact_id=request.contact.id)
 
-    # enqueue twilio call so reach out to contact
+    # enqueue twilio call to reach out to contact
     background_tasks.add_task(make_twilio_call, request.contact)
 
     return GHLContactResponse(contact_status="contacting", contact_id=request.contact.id)
 
-def make_twilio_call(contact: GHLContact):
-    practice_name = contact.practiceName
+async def make_twilio_call(contact: GHLContact):
+    if await check_contact_dnc(contact.id):
+        note = f"Skipped outbound call for {contact.firstName}: contact is DNC/DND."
+        await add_note(contact.id, note)
+        print(f"[DNC SKIP] Contact {contact.id}: do-not-contact flag set, call aborted")
+        return
+
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
@@ -66,6 +71,33 @@ def make_twilio_call(contact: GHLContact):
     active_calls[call.sid] = contact
 
     print(f"Call initiated: {call.sid}")
+
+async def check_contact_dnc(contact_id: str) -> bool:
+    contact_data = await get_contact(contact_id)
+    if not contact_data:
+        return False
+    contact = contact_data.get("contact", contact_data)
+    if contact.get("dnd"):
+        return True
+    tags = contact.get("tags") or []
+    if "ai-opted-out" in tags:
+        return True
+    return False
+
+async def get_contact(contact_id: str) -> dict | None:
+    return await ghl_request("GET", f"/contacts/{contact_id}", {})
+
+async def ghl_request(method: str, path: str, payload: dict) -> dict | None:
+    try:
+        async with httpx.AsyncClient(
+            base_url=GHL_API_BASE, headers=GHL_HEADERS, timeout=10
+        ) as client:
+            resp = await client.request(method, path, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        print(f"[GHL] {method} {path} failed: {e}")
+        return None
 
 @app.websocket('/media-stream')
 async def handle_twilio_openai_stream(twilio_ws: WebSocket):
@@ -402,18 +434,6 @@ async def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> d
             print(f"[UNKNOWN_TOOL] {name}")
             return {"status": "unknown_tool", "name": name}
         
-async def ghl_request(method: str, path: str, payload: dict) -> dict | None:
-    try:
-        async with httpx.AsyncClient(
-            base_url=GHL_API_BASE, headers=GHL_HEADERS, timeout=10
-        ) as client:
-            resp = await client.request(method, path, json=payload)
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as e:
-        print(f"[GHL] {method} {path} failed: {e}")
-        return None
-
 async def add_note(contact_id: str, body: str) -> None:
     await ghl_request("POST", f"/contacts/{contact_id}/notes", {"body": body})
 
