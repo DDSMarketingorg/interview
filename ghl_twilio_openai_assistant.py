@@ -204,7 +204,8 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                             await twilio_ws.close()
                             await openai_ws.close()
                             break
-
+                        
+                        #send a result message from the tool call to inform the model what just transpired
                         await openai_ws.send(json.dumps({
                             "type": "conversation.item.create",
                             "item": {
