@@ -6,10 +6,13 @@ from fastapi import FastAPI, BackgroundTasks, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 import websockets
 from twilio.rest import Client
-from pydantic import BaseModel
 from dotenv import load_dotenv
+from schemas import GHLContact, GHLContactRequest, GHLContactResponse
 
 load_dotenv()
+
+GHL_API_KEY = os.getenv("GHL_API_KEY")
+
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -20,21 +23,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 app = FastAPI(title="AI Voice Assistant")
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 active_calls: dict[str, dict] = {}
-
-class GHLContact(BaseModel):
-    id: str
-    firstName: str
-    phone: str
-    email: str
-    practiceName: str
-
-class GHLContactRequest(BaseModel):
-    event: str
-    contact: GHLContact
-
-class GHLContactResponse(BaseModel):
-    contact_status: str
-    contact_id: str
 
 def make_twilio_call(contact: GHLContact):
     practice_name = contact.practiceName
