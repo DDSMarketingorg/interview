@@ -8,11 +8,11 @@ The AI asks for only four things:
 - Insurance provider
 - Prefered day/time for appointment
 
-The prompt explicitly forbids the AI from asking medical history, SSN, payment info, or "full history" (`ghl_twilio_openai_assistant.py:256`).
+The prompt explicitly forbids the AI from asking medical history, SSN, payment info, or "full history" (`ghl_twilio_openai_assistant.py:257`).
 
-The AI also announces it is not a medical professional and cannot give clinical advice (`ghl_twilio_openai_assistant.py:240`).
+The AI also announces it is not a medical professional and cannot give clinical advice (`ghl_twilio_openai_assistant.py:241`).
 
-All collected data is stored as a plain-text note on the GHL contact (`ghl_twilio_openai_assistant.py:392-398`). The note includes the contact's phone and email which come from the GHL record itself, not from the caller.
+All collected data is stored as a plain-text note on the GHL contact (`ghl_twilio_openai_assistant.py:393-399`). The note includes the contact's phone and email which come from the GHL record itself, not from the caller.
 
 ---
 
@@ -24,7 +24,7 @@ All collected data is stored as a plain-text note on the GHL contact (`ghl_twili
 
 If either is true, the call is skipped and a note is logged.
 
-**During the call** (`ghl_twilio_openai_assistant.py:439-445`): If the caller asks not to be contacted again, the `opt_out` tool sets both `dnd=True` and the `ai-opted-out` tag on their GHL record. A future webhook for the same contact will be blocked by the pre-call check above.
+**During the call** (`ghl_twilio_openai_assistant.py:440-446`): If the caller asks not to be contacted again, the `opt_out` tool sets both `dnd=True` and the `ai-opted-out` tag on their GHL record. A future webhook for the same contact will be blocked by the pre-call check above.
 
 ---
 
