@@ -13,7 +13,7 @@ from schemas import GHLContact, GHLContactRequest, GHLContactResponse
 load_dotenv()
 
 GHL_API_KEY = os.getenv("GHL_API_KEY")
-GHL_API_BASE = os.getenv("GHL_API_BASE")
+GHL_API_PREFIX = os.getenv("GHL_API_PREFIX")
 GHL_HEADERS = {
     "Authorization": f"Bearer {GHL_API_KEY}",
     "Version": "2021-07-28",
@@ -32,7 +32,8 @@ active_calls: dict[str, dict] = {}
 
 @app.post("/ghl/contact")
 async def handle_ghl_contact(request: GHLContactRequest, background_tasks: BackgroundTasks) -> GHLContactResponse:
-    print("handle_ghl_contact")
+    '''handles new contact lead events from GoHighLevel CRM and enques a call to reach out to new contact asap'''
+
     if request.event != "contact.created":
         return GHLContactResponse(contact_status="ignored", contact_id=request.contact.id)
 
@@ -49,12 +50,16 @@ async def handle_ghl_contact(request: GHLContactRequest, background_tasks: Backg
     return GHLContactResponse(contact_status="contacting", contact_id=request.contact.id)
 
 async def make_twilio_call(contact: GHLContact):
+    '''use twilio api to call the new contact and have it connect to the media stream websocket when they answer'''
+
+    # dont bother people who dont want to be called
     if await check_contact_dnc(contact.id):
         note = f"Skipped outbound call for {contact.firstName}: contact is DNC/DND."
         await add_note(contact.id, note)
         print(f"[DNC SKIP] Contact {contact.id}: do-not-contact flag set, call aborted")
         return
 
+    # lets twilio know to connect the call to the media-stream websocket
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
@@ -73,6 +78,8 @@ async def make_twilio_call(contact: GHLContact):
     print(f"Call initiated: {call.sid}")
 
 async def check_contact_dnc(contact_id: str) -> bool:
+    '''check if contact does not want to be called'''
+
     contact_data = await get_contact(contact_id)
     if not contact_data:
         return False
@@ -88,9 +95,10 @@ async def get_contact(contact_id: str) -> dict | None:
     return await ghl_request("GET", f"/contacts/{contact_id}", {})
 
 async def ghl_request(method: str, path: str, payload: dict) -> dict | None:
+    '''formats and sends requests to GHL api'''
     try:
         async with httpx.AsyncClient(
-            base_url=GHL_API_BASE, headers=GHL_HEADERS, timeout=10
+            base_url=GHL_API_PREFIX, headers=GHL_HEADERS, timeout=10
         ) as client:
             resp = await client.request(method, path, json=payload)
             resp.raise_for_status()
@@ -101,7 +109,8 @@ async def ghl_request(method: str, path: str, payload: dict) -> dict | None:
 
 @app.websocket('/media-stream')
 async def handle_twilio_openai_stream(twilio_ws: WebSocket):
-    print("handle_twilio_openai_stream")
+    '''called when a user answers the phone. Connects the twilio media stream with open ai audio stream'''
+
     await twilio_ws.accept()
 
     temperature = 0.8
@@ -116,6 +125,7 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
 
         async def receive_from_twilio():
             """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
+
             nonlocal stream_sid, contact
             call_sid = None
 
@@ -123,6 +133,7 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                 async for message in twilio_ws.iter_text():
                     data = json.loads(message)
 
+                    # check if conversation just started and prompt openai to speak first
                     if data['event'] == 'start':
                         stream_sid = data['start']['streamSid']
                         call_sid = data['start'].get('callSid')
@@ -130,6 +141,7 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                             contact = active_calls[call_sid]
                             await initialize_openai_realtime_session(openai_ws, contact)
                             await send_initial_openai_conversation_item(openai_ws, contact)
+                    # translate twilio sever media event into an openai client audio event and send
                     elif data['event'] == 'media' and openai_ws.state.name == 'OPEN':
                         audio_append = {
                             "type": "input_audio_buffer.append",
@@ -141,16 +153,20 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                 if openai_ws.state.name == 'OPEN':
                     await openai_ws.close()
             finally:
+                # make sure we clean up the active call when the connection ends
                 if call_sid:
                     active_calls.pop(call_sid, None)
 
         async def receive_from_openai():
-            """Receive events from the OpenAI Realtime API, send audio back to Twilio."""
+            '''Receive events from the OpenAI Realtime API, send audio back to Twilio.'''
+
             nonlocal stream_sid, contact
+
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
-
+                    
+                    # translate openai sever audio event into a twilio client media event and send
                     if response['type'] == 'response.output_audio.delta' and response.get('delta'):
                         try:
                             audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
@@ -164,6 +180,7 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                             await twilio_ws.send_json(audio_delta)
                         except Exception as e:
                             print(f"Error processing audio data: {e}")
+                    # check if ai model decided to call a tool and handle it
                     elif response['type'] == 'response.function_call_arguments.done':
                         call_id = response['call_id']
                         name = response['name']
@@ -173,6 +190,7 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
                             arguments = {}
                         result = await handle_tool_call(name, arguments, contact)
 
+                        # ends the call if its a 911 emergency or the model determines the conversation is done
                         if result.get("end_call"):
                             await openai_ws.send(json.dumps({
                                 "type": "conversation.item.create",
@@ -202,6 +220,8 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
         await asyncio.gather(receive_from_twilio(), receive_from_openai())
 
 async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
+    '''set system message and available tools for openai realtime'''
+
     system_message = f"""You are a professional AI scheduling assistant calling on behalf of {contact.practiceName}, a dental office. You're speaking with someone who recently submitted a request for a dental appointment. Your job is to qualify the lead and help book a visit.
 
     Identity & disclosure:
@@ -335,7 +355,8 @@ async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
     await openai_ws.send(json.dumps(session_update))
 
 async def send_initial_openai_conversation_item(openai_ws, contact: GHLContact):
-    """Send initial conversation so AI talks first."""
+    '''Send initial conversation so AI talks first.'''
+
     initial_conversation_item = {
         "type": "conversation.item.create",
         "item": {
@@ -359,6 +380,8 @@ async def send_initial_openai_conversation_item(openai_ws, contact: GHLContact):
     await openai_ws.send(json.dumps({"type": "response.create"}))
     
 async def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> dict:
+    '''reads tool names from ai assistant response and executes the specified tool'''
+
     match name:
         case "qualify_lead":
             pain = arguments.get("pain_level", "N/A")
