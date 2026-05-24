@@ -15,7 +15,6 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 DOMAIN = os.getenv("DOMAIN")
-PORT = os.getenv("PORT")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI(title="AI Voice Assistant")
@@ -92,6 +91,8 @@ async def handle_twilio_openai_stream(twilio_ws: WebSocket):
         async def receive_from_twilio():
             """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
             nonlocal stream_sid, contact
+            call_sid = None
+
             try:
                 async for message in twilio_ws.iter_text():
                     data = json.loads(message)
