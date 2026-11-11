@@ -1,127 +1,167 @@
-# AI Voice Assistant – Interview Assignment
+# Senior Engineer Exercise: AI Voice Agent in Production
 
-## 📌 Project Overview
-Design a mini system for a **dental marketing AI voice assistant** that integrates with **GoHighLevel (GHL)**.  
-The system should:  
-1. Receive new leads from GHL (via webhook).  
-2. Initiate an outbound call using Twilio (or another voice API).  
-3. Use AI (STT + LLM + TTS) to qualify the lead and collect structured info.  
-4. Update the lead’s status back in GHL (notes, stage, or appointment).
+We run AI receptionists for dental clinics. A voice agent answers and places
+calls, looks up appointments and books them through tools on our backend. Leads
+arrive from GoHighLevel (GHL).
 
----
+This exercise is not about how much you build. It is about how you think:
+**finding what is wrong, making it simpler, proving it works, and knowing when
+it breaks.**
 
-## 🎯 Objectives
-- Show **system architecture** and data flow.  
-- Provide **code snippets** for key interactions.  
-- Demonstrate **compliance awareness** (DNC, PHI, escalation).  
+**Time box: about 3 hours.** Stop at 3 hours and write down what you would do
+next. A small, well-reasoned change beats a large one.
 
 ---
 
-## 🛠 Requirements
+## The code you are inheriting
 
-### 1. Architecture
-- Diagram or clear explanation of the flow:  
-  `GHL Webhook → Backend → Voice Provider → AI Pipeline → GHL Update`
+A previous engineer wrote this service. It is "working" in production.
 
-### 2. Code Examples
-Provide working or pseudocode for:  
-- Handling a **GHL webhook** (new lead).  
-- Initiating a **Twilio outbound call**.  
-- LLM prompt design to capture structured data like:  
-  ```json
-  {
-    "pain_level": "7/10",
-    "insurance": "Sun Life",
-    "preferred_slot": "2025-09-07 15:30"
-  }
-- 	•	Writing results back to GHL (appointment or note)
-- 	### 3. Compliance
-When designing a system that handles patient calls, compliance and safety are critical. In your solution, explain how you would address:  
-
-- **Do Not Disturb (DND) / Do Not Call (DNC)**  
-  - Respect the flags from GHL to avoid calling leads who opted out.  
-
-- **Protected Health Information (PHI)**  
-  - Collect only minimal data necessary for appointment booking (chief complaint, pain scale, insurance provider).  
-  - Avoid storing sensitive information beyond what is needed.  
-  - Ensure all stored data is encrypted at rest and in transit.  
-
-- **Escalation & Safety**  
-  - Define red-flag conditions (e.g., severe pain 8–10, swelling + fever, trauma, allergies).  
-  - In such cases, the AI should **immediately transfer** to a human receptionist or dentist.  
-  - Clearly state that the AI cannot provide clinical advice.  
-
----
-
-## 📂 Deliverables
-- A pull request to this **GitHub repo** containing:  
-  - Architecture diagram (flow from GHL → AI voice pipeline → GHL update).  
-  - Code snippets (Node.js, Python, or your preferred language).  
-  - Notes on compliance and design decisions.  
-  - (Optional) Example conversations/transcripts showing how the AI responds.  
-
----
-
-## ⚙️ Suggested Tech Stack
-- **Voice Layer**: Twilio Programmable Voice (or SignalWire)  
-- **Speech-to-Text (STT)**: Whisper API or Google Cloud Speech-to-Text  
-- **Language Model (LLM)**: GPT-4o (or similar) for dialogue + tool calling  
-- **Text-to-Speech (TTS)**: Amazon Polly or ElevenLabs  
-- **Backend**: Node.js (Express) or Python (FastAPI) for handling webhooks and call logic  
-- **Database (optional)**: Postgres (to store call logs, transcripts, and metrics)  
-
----
-
-## 📅 Submission
-- Submit your solution either as:  
-  1. A **GitHub repo link**, or  
-  2. A **PDF/Markdown doc** with architecture, code snippets, and explanations.  
-
-- **Deadline:** 3 days after receiving this assignment.  
-
----
-
-## 🔖 Reference Payloads
-
-### Example GHL Webhook (New Lead)
-```json
-{
-  "event": "contact.created",
-  "contact": {
-    "id": "CNT_xxx",
-    "firstName": "Sarah",
-    "phone": "+1416xxxxxxx",
-    "email": "sarah@example.com"
-  }
-}
-### Example Twilio Outbound Call (Node.js)
 ```js
+// server.js
+import express from "express";
 import twilio from "twilio";
+import { pms } from "./pms.js"; // practice-management system client (stub it)
 
-const client = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
+const app = express();
+app.use(express.json());
 
-async function makeCall(toNumber, greeting) {
-  try {
-    const call = await client.calls.create({
-      to: toNumber,
-      from: process.env.TWILIO_NUMBER,
-      twiml: `<Response>
-                <Say voice="alice">${greeting}</Say>
-                <Pause length="5"/>
-                <Say voice="alice">Thank you. Goodbye.</Say>
-              </Response>`
-    });
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+const GHL_API_KEY = "pit-3f9c2e7a-51b0-4d6e-9a1f-REPLACE_ME";
 
-    console.log(`Call initiated. SID: ${call.sid}`);
-    return call.sid;
-  } catch (err) {
-    console.error("Error initiating call:", err);
-    throw err;
-  }
-}
+// 1. GHL calls this when a new lead is created. We call the lead right away.
+app.post("/webhooks/ghl/lead", async (req, res) => {
+  const { contact } = req.body;
+  console.log("new lead", JSON.stringify(req.body));
 
-// Example usage
-makeCall("+1416xxxxxxx", "Hello Sarah, this is Nova Dentistry calling about your appointment request.");
+  await client.calls.create({
+    to: contact.phone,
+    from: process.env.TWILIO_NUMBER,
+    twiml: `<Response>
+              <Say>Hi ${contact.firstName}, this is Bright Smile Dental calling about your request.</Say>
+              <Connect><Stream url="wss://agent.example.com/stream"/></Connect>
+            </Response>`,
+  });
+
+  res.sendStatus(200);
+});
+
+// 2. The voice agent calls this tool during a live call.
+//    `args` are produced by the LLM.
+app.post("/tools/lookup_appointments", async (req, res) => {
+  const { phone } = req.body.args;
+  const appts = await pms.findAppointmentsByPhone(phone);
+  console.log("lookup", phone, appts);
+  res.json(appts);
+});
+
+// 3. The voice agent calls this tool to book. The LLM sends e.g. "2026-11-17 15:00".
+app.post("/tools/book_appointment", async (req, res) => {
+  const { patientId, slot } = req.body.args;
+  const appt = await pms.createAppointment(patientId, new Date(slot + "Z"));
+  res.json(appt);
+});
+
+app.listen(3000);
+```
+
+Each request to `/tools/*` also carries `req.body.call`, set by our voice
+platform (not by the LLM):
+
+```json
+{ "call": { "sid": "CA123", "clinicId": "clinic_42", "callerPhone": "+13055550123", "direction": "inbound" },
+  "args": { "phone": "+13055550123" } }
+```
+
+---
+
+## Part 1: Debug and fix (about 90 min)
+
+1. **Review the code as if it were a PR to production.** List every problem
+   you find, ranked by how much damage it could do, and say why. Think about
+   security, patient privacy, reliability under retries and timeouts, and
+   correctness.
+2. **Fix the top problems** in a runnable Node.js or Python version of this
+   service. Stub `pms` and Twilio; do not call real services.
+3. **Write tests that prove your fixes.** At least one test should show an
+   attack or failure that worked before your fix and fails after it.
+
+## Part 2: Debug a real complaint (about 15 min)
+
+A clinic in Florida (Eastern Time) writes:
+
+> "A patient asked the AI for Tuesday at 3 pm. She showed up at 3 pm, but our
+> schedule had her at 10 am."
+
+Logs:
+
+```
+2026-11-16T19:03:40Z call=CA881 clinic=clinic_42 tool=book_appointment args={"patientId":"p_88","slot":"2026-11-17 15:00"} status=200
+2026-11-16T19:03:41Z pms.createAppointment patient=p_88 start=2026-11-17T15:00:00.000Z
+```
+
+What is the root cause, what is the fix, which test would have caught it, and
+how many other patients might be affected? How would you find them?
+
+## Part 3: Simplify (about 30 min, written)
+
+For the next phase, an engineer proposed this architecture:
+
+- API gateway, lead-service, call-service, agent-service, booking-service,
+  notification-service, analytics-service (7 services, each with its own Postgres)
+- Kafka between every service
+- A Hadoop cluster for logs and alerting
+- Kubernetes for all of it
+
+Current load: **20 clinics, about 150 calls a week. Two engineers.**
+
+- Draw (ASCII is fine) the **simplest design** you would run today.
+- What do you delete, and what would break without each piece you keep?
+- At what concrete load or team size would you split something out, and what
+  would you split first?
+
+## Part 4: Know when it breaks (about 45 min)
+
+Last quarter, five clinics' voice agents silently stopped receiving calls.
+Nobody noticed for weeks. A cron job also crashed 34 times in one week and
+everyone ignored the alerts.
+
+1. **Build** a check that alerts when a clinic gets **zero calls during
+   business hours for 24 hours**, plus one more alert you think matters most.
+   Code plus a test is better than a description.
+2. **Write** (short): where alerts go, who owns them, and how you keep alerts
+   rare enough that people still read them.
+3. **One paragraph:** how would you prove a clinic's agent works end to end
+   *before* a patient finds out it does not?
+
+## Part 5: Ship an AI change safely (short, written)
+
+You need to change the agent's system prompt to fix a bad behavior. How do you
+know the new prompt fixed it **without breaking other conversations**? What do
+you run before shipping, and how do you roll back?
+
+---
+
+## Rules
+
+- **AI coding tools are welcome.** In the follow-up call you will walk us
+  through your change, and we will ask about any line of it.
+- **Fake data only.** No real patient data, phone numbers or API keys.
+- Keep the change small. We read every line; we would rather read 200 good
+  ones than 2,000.
+- If something is unclear, make a reasonable assumption and write it down.
+
+## Deliverables
+
+1. Your code and tests, with a short way to run them (one command).
+2. `NOTES.md`, at most about two pages: your ranked problem list (Part 1), and
+   your answers to Parts 2 to 5.
+
+## Submission
+
+**Do not open a pull request on this repository; it is public.** Create a
+**private** repository with your solution and add the GitHub user we send you,
+or send a zip by email.
+
+**Deadline:** 3 days after you receive this exercise. Plan on about 3 hours of
+work. A 30-minute follow-up call reviews it with you.
