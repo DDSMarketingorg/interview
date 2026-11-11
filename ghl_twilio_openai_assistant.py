@@ -1,0 +1,471 @@
+import os
+import json
+import base64
+import asyncio
+from fastapi import FastAPI, BackgroundTasks, WebSocket
+from fastapi.websockets import WebSocketDisconnect
+import websockets
+from twilio.rest import Client
+from dotenv import load_dotenv
+import httpx
+from schemas import GHLContact, GHLContactRequest, GHLContactResponse
+
+load_dotenv()
+
+GHL_API_KEY = os.getenv("GHL_API_KEY")
+GHL_API_PREFIX = os.getenv("GHL_API_PREFIX")
+GHL_HEADERS = {
+    "Authorization": f"Bearer {GHL_API_KEY}",
+    "Version": "2021-07-28",
+    "Content-Type": "application/json",
+}
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+DOMAIN = os.getenv("DOMAIN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+app = FastAPI(title="AI Voice Assistant")
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+active_calls: dict[str, dict] = {}
+
+@app.post("/ghl/contact")
+async def handle_ghl_contact(request: GHLContactRequest, background_tasks: BackgroundTasks) -> GHLContactResponse:
+    '''handles new contact lead events from GoHighLevel CRM and enques a call to reach out to new contact asap'''
+
+    if request.event != "contact.created":
+        return GHLContactResponse(contact_status="ignored", contact_id=request.contact.id)
+
+    # ignore contacts with empty or whitespace data
+    # we need a phone number to call and a practice to book the appointment for
+    if not request.contact.firstName.strip() or \
+       not request.contact.phone.strip() or \
+       not request.contact.practiceName.strip():
+        return GHLContactResponse(contact_status="invalid", contact_id=request.contact.id)
+
+    # enqueue twilio call to reach out to contact
+    background_tasks.add_task(make_twilio_call, request.contact)
+
+    return GHLContactResponse(contact_status="contacting", contact_id=request.contact.id)
+
+async def make_twilio_call(contact: GHLContact):
+    '''use twilio api to call the new contact and have it connect to the media stream websocket when they answer'''
+
+    # dont bother people who dont want to be called
+    if await check_contact_dnc(contact.id):
+        note = f"Skipped outbound call for {contact.firstName}: contact is DNC/DND."
+        await add_note(contact.id, note)
+        print(f"[DNC SKIP] Contact {contact.id}: do-not-contact flag set, call aborted")
+        return
+
+    # lets twilio know to connect the call to the media-stream websocket
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <Response>
+        <Connect>
+            <Stream url="wss://{DOMAIN}/media-stream" />
+        </Connect>
+    </Response>"""
+
+    call = twilio_client.calls.create(
+        to=contact.phone,
+        from_=TWILIO_PHONE_NUMBER,
+        twiml=twiml,
+    )
+
+    active_calls[call.sid] = contact
+
+    print(f"Call initiated: {call.sid}")
+
+async def check_contact_dnc(contact_id: str) -> bool:
+    '''check if contact does not want to be called'''
+
+    contact_data = await get_contact(contact_id)
+    if not contact_data:
+        return False
+    contact = contact_data.get("contact", contact_data)
+    if contact.get("dnd"):
+        return True
+    tags = contact.get("tags") or []
+    if "ai-opted-out" in tags:
+        return True
+    return False
+
+async def get_contact(contact_id: str) -> dict | None:
+    return await ghl_request("GET", f"/contacts/{contact_id}", {})
+
+async def ghl_request(method: str, path: str, payload: dict) -> dict | None:
+    '''formats and sends requests to GHL api'''
+    try:
+        async with httpx.AsyncClient(
+            base_url=GHL_API_PREFIX, headers=GHL_HEADERS, timeout=10
+        ) as client:
+            resp = await client.request(method, path, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        print(f"[GHL] {method} {path} failed: {e}")
+        return None
+
+@app.websocket('/media-stream')
+async def handle_twilio_openai_stream(twilio_ws: WebSocket):
+    '''called when a user answers the phone. Connects the twilio media stream with open ai audio stream'''
+
+    await twilio_ws.accept()
+
+    temperature = 0.8
+    async with websockets.connect(
+        f"wss://api.openai.com/v1/realtime?model=gpt-realtime&temperature={temperature}",
+        additional_headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}"
+        }
+    ) as openai_ws:
+        stream_sid = None
+        contact = None
+
+        async def receive_from_twilio():
+            """Receive audio data from Twilio and send it to the OpenAI Realtime API."""
+
+            nonlocal stream_sid, contact
+            call_sid = None
+
+            try:
+                async for message in twilio_ws.iter_text():
+                    data = json.loads(message)
+
+                    # check if conversation just started and prompt openai to speak first
+                    if data['event'] == 'start':
+                        stream_sid = data['start']['streamSid']
+                        call_sid = data['start'].get('callSid')
+                        if call_sid and call_sid in active_calls:
+                            contact = active_calls[call_sid]
+                            await initialize_openai_realtime_session(openai_ws, contact)
+                            await send_initial_openai_conversation_item(openai_ws, contact)
+                    # translate twilio sever media event into an openai client audio event and send
+                    elif data['event'] == 'media' and openai_ws.state.name == 'OPEN':
+                        audio_append = {
+                            "type": "input_audio_buffer.append",
+                            "audio": data['media']['payload']
+                        }
+                        await openai_ws.send(json.dumps(audio_append))
+            except WebSocketDisconnect:
+                print("Client disconnected.")
+                if openai_ws.state.name == 'OPEN':
+                    await openai_ws.close()
+            finally:
+                # make sure we clean up the active call when the connection ends
+                if call_sid:
+                    active_calls.pop(call_sid, None)
+
+        async def receive_from_openai():
+            '''Receive events from the OpenAI Realtime API, send audio back to Twilio.'''
+
+            nonlocal stream_sid, contact
+
+            try:
+                async for openai_message in openai_ws:
+                    response = json.loads(openai_message)
+                    
+                    # translate openai sever audio event into a twilio client media event and send
+                    if response['type'] == 'response.output_audio.delta' and response.get('delta'):
+                        try:
+                            audio_payload = base64.b64encode(base64.b64decode(response['delta'])).decode('utf-8')
+                            audio_delta = {
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {
+                                    "payload": audio_payload
+                                }
+                            }
+                            await twilio_ws.send_json(audio_delta)
+                        except Exception as e:
+                            print(f"Error processing audio data: {e}")
+                    # check if ai model decided to call a tool and handle it
+                    elif response['type'] == 'response.function_call_arguments.done':
+                        call_id = response['call_id']
+                        name = response['name']
+                        try:
+                            arguments = json.loads(response['arguments'])
+                        except json.JSONDecodeError:
+                            arguments = {}
+                        result = await handle_tool_call(name, arguments, contact)
+
+                        # ends the call if its a 911 emergency or the model determines the conversation is done
+                        if result.get("end_call"):
+                            await openai_ws.send(json.dumps({
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": json.dumps({"acknowledged": True})
+                                }
+                            }))
+                            await asyncio.sleep(0.5)
+                            await twilio_ws.close()
+                            await openai_ws.close()
+                            break
+                        
+                        #send a result message from the tool call to inform the model what just transpired
+                        await openai_ws.send(json.dumps({
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps(result)
+                            }
+                        }))
+                        await openai_ws.send(json.dumps({"type": "response.create"}))
+            except Exception as e:
+                print(f"Error in send_to_twilio: {e}")
+                
+        await asyncio.gather(receive_from_twilio(), receive_from_openai())
+
+async def initialize_openai_realtime_session(openai_ws, contact: GHLContact):
+    '''set system message and available tools for openai realtime'''
+
+    system_message = f"""You are a professional AI scheduling assistant calling on behalf of {contact.practiceName}, a dental office. You're speaking with someone who recently submitted a request for a dental appointment. Your job is to qualify the lead and help book a visit.
+
+    Identity & disclosure:
+    - You are an AI assistant. Make that clear in your greeting, and again if asked.
+
+    Your goals, in order:
+    1. Confirm you're speaking with the right person.
+    2. Briefly reference that they requested an appointment.
+    3. Collect: reason for the visit, pain level on a 1-to-10 scale, whether they have dental insurance (and the provider if so), and a preferred day/time.
+    4. Offer to book an appointment and confirm the details back to them.
+
+    Using tools:
+    - Use your tools to record the caller's details and to check or book appointment times. Call the qualification tool once you have the information rather than only talking about it.
+
+    Safety & escalation (important):
+    - You are NOT a medical professional. Never diagnose, never give clinical or treatment advice, never recommend medication.
+    - There are two escalation paths. Use the right one:
+      1. escalate_emergency: Life-threatening emergencies ONLY — uncontrolled bleeding, physical trauma to the face/mouth, airway obstruction, signs of stroke or heart attack. Tell the caller to hang up and call 911 immediately. Do not wait for a callback.
+      2. escalate_to_human: Dental urgency (pain 8-10, swelling with fever, signs of serious infection) OR the caller asks to speak to a person OR the caller is unable to complete the booking process. Calmly let them know someone from the office will reach out to them right away.
+    - qualify_lead may return an escalate flag for high pain — read that result and escalate if indicated.
+
+    Ending the call (important):
+    - After telling the caller to call 911 (escalate_emergency), call end_call IMMEDIATELY. Do not say anything else.
+    - After the caller opts out, call end_call immediately.
+    - After escalating to a human, call end_call.
+    - After successfully booking an appointment and confirming details, call end_call.
+    - When the conversation reaches a natural conclusion, call end_call rather than lingering.
+
+    Conversation style (this is a live phone call):
+    - Keep replies short and natural. Ask one question at a time. Never read lists or formatting aloud.
+    - Be warm, efficient, and respectful of their time.
+    - Collect only what's needed to schedule. Do not ask for full medical history, SSN, or payment details.
+    - If it's a bad time, offer to reschedule the call. If they ask not to be called again, acknowledge it, stop, and don't push. If they're not interested, thank them and end politely.
+    - If you can't handle something, offer to have a human from the office follow up.
+    """
+
+    session_update = {
+        "type": "session.update",
+        "session": {
+            "type": "realtime",
+            "model": "gpt-realtime",
+            "output_modalities": ["audio"],
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcmu"},
+                    "turn_detection": {"type": "server_vad"}
+                },
+                "output": {
+                    "format": {"type": "audio/pcmu"},
+                    "voice": "alloy"
+                }
+            },
+            "instructions": system_message,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "qualify_lead",
+                    "description": "Record the caller's qualification details once collected — pain level, insurance provider, reason for visit, and preferred day/time. Call this as soon as you have the information rather than only talking about it.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pain_level": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Self-reported pain on a 1-10 scale"},
+                            "insurance_provider": {"type": "string", "description": "Dental insurance provider name, or 'none' if no insurance"},
+                            "reason_for_visit": {"type": "string", "description": "Chief complaint or reason for the dental visit"},
+                            "preferred_day_time": {"type": "string", "description": "Preferred appointment day and time, e.g. 'Monday afternoon'"}
+                        },
+                        "required": ["pain_level", "reason_for_visit"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "schedule_appointment",
+                    "description": "Book an appointment for the caller at the given date and time. Only call after qualification is complete and the caller has agreed to book.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "date_time": {"type": "string", "description": "Confirmed date and time, e.g. '2025-06-15 14:00'"}
+                        },
+                        "required": ["date_time"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "escalate_emergency",
+                    "description": "Caller has a life-threatening emergency — uncontrolled bleeding, trauma, cannot breathe, stroke/heart attack signs. Tell them to call 911 immediately.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "emergency_type": {"type": "string", "description": "Brief description of the life-threatening emergency"}
+                        },
+                        "required": ["emergency_type"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "escalate_to_human",
+                    "description": "Escalate to the dental office for human callback. Use for dental urgency (pain 8+, swelling with fever, infection signs), caller requests a person, or caller cannot complete booking.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string", "description": "Why this needs human follow-up"}
+                        },
+                        "required": ["reason"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "opt_out",
+                    "description": "Caller asked not to be contacted again. Record and stop the conversation politely.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "end_call",
+                    "description": "End the call immediately. Must be called after escalate_emergency (911), after opt_out, after escalate_to_human, after successful booking, or when the conversation is complete.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string", "description": "Why the call is ending"}
+                        },
+                        "required": ["reason"]
+                    }
+                }
+            ],
+        }
+    }
+
+    await openai_ws.send(json.dumps(session_update))
+
+async def send_initial_openai_conversation_item(openai_ws, contact: GHLContact):
+    '''Send initial conversation so AI talks first.'''
+
+    initial_conversation_item = {
+        "type": "conversation.item.create",
+        "item": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                    f"The call has just connected. Open the conversation: greet {contact.firstName} warmly, "
+                    f"introduce yourself as an automated AI scheduling assistant calling on behalf of "
+                    f"{contact.practiceName} about the dental appointment request they recently submitted, and "
+                    f"confirm you're speaking with {contact.firstName}. Keep it to one or two short, friendly "
+                    f"sentences, then stop and wait for their reply."
+                )
+                }
+            ]
+        }
+    }
+    await openai_ws.send(json.dumps(initial_conversation_item))
+    await openai_ws.send(json.dumps({"type": "response.create"}))
+    
+async def handle_tool_call(name: str, arguments: dict, contact: GHLContact) -> dict:
+    '''reads tool names from ai assistant response and executes the specified tool'''
+
+    match name:
+        case "qualify_lead":
+            pain = arguments.get("pain_level", "N/A")
+            insurance = arguments.get("insurance_provider") or "none"
+            reason = arguments.get("reason_for_visit", "N/A")
+            preferred = arguments.get("preferred_day_time", "N/A")
+
+            note = (
+                f"AI qualification call — {contact.firstName}\n"
+                f"Pain: {pain}/10 | Insurance: {insurance}\n"
+                f"Reason: {reason} | Preferred: {preferred}\n"
+                f"Phone: {contact.phone} | Email: {contact.email}"
+            )
+            await add_note(contact.id, note)
+            await add_tags(contact.id, ["ai-qualified"])
+
+            print(f"[QUALIFY] Contact {contact.id}: "
+                  f"pain={pain}/10 insurance={insurance} reason='{reason}' preferred='{preferred}'")
+
+            if isinstance(pain, (int, float)) and int(pain) >= 8:
+                return {"escalate": True, "message": "High pain level detected. The office will prioritize this case."}
+
+            return {"status": "recorded", "message": "Your details have been noted. Let me check available appointments."}
+
+        case "schedule_appointment":
+            date_time = arguments.get("date_time", "TBD")
+
+            note = f"AI booked appointment for {contact.firstName}: {date_time}"
+            await add_note(contact.id, note)
+            await add_tags(contact.id, ["ai-qualified", "appointment-booked"])
+
+            print(f"[SCHEDULE] Contact {contact.id}: appointment={date_time}")
+            return {"status": "booked", "confirmation": f"Appointment set for {date_time}. A confirmation will be sent to {contact.email}."}
+
+        case "escalate_emergency":
+            emergency = arguments.get("emergency_type", "not specified")
+
+            note = f"!!! 911 EMERGENCY during AI call with {contact.firstName} ({contact.phone}): {emergency}"
+            await add_note(contact.id, note)
+            await add_tags(contact.id, ["ai-escalated-emergency"])
+
+            print(f"!!! [911] Contact {contact.id}: LIFE-THREATENING EMERGENCY")
+            return {"status": "911", "message": "Stop. This is a medical emergency. Hang up and call 911 immediately. Do not wait."}
+
+        case "escalate_to_human":
+            reason = arguments.get("reason", "not specified")
+
+            note = f"AI escalated to human for {contact.firstName} ({contact.phone}). Reason: {reason}"
+            await add_note(contact.id, note)
+            await add_tags(contact.id, ["ai-escalated-human"])
+
+            print(f"[ESCALATE] Contact {contact.id}: needs human callback. Reason: {reason}")
+            return {"status": "escalated", "message": "Someone from the office will call you back right away to help."}
+
+        case "opt_out":
+            note = f"{contact.firstName} opted out of further contact during AI call."
+            await add_note(contact.id, note)
+            await add_tags(contact.id, ["ai-opted-out"])
+            await update_contact(contact.id, dnd=True)
+
+            print(f"[DNC] Contact {contact.id}: requested no further contact")
+            return {"status": "opted_out", "message": "Noted. You will not be contacted again."}
+
+        case "end_call":
+            reason = arguments.get("reason", "call complete")
+
+            note = f"AI call ended for {contact.firstName}. Reason: {reason}"
+            await add_note(contact.id, note)
+
+            print(f"[END CALL] Contact {contact.id}: {reason}")
+            return {"end_call": True, "message": "The call is complete. Say a brief goodbye and end the conversation."}
+
+        case _:
+            print(f"[UNKNOWN_TOOL] {name}")
+            return {"status": "unknown_tool", "name": name}
+        
+async def add_note(contact_id: str, body: str) -> None:
+    await ghl_request("POST", f"/contacts/{contact_id}/notes", {"body": body})
+
+
+async def update_contact(contact_id: str, **fields) -> None:
+    await ghl_request("PUT", f"/contacts/{contact_id}", fields)
+
+
+async def add_tags(contact_id: str, tags: list[str]) -> None:
+    await ghl_request("POST", f"/contacts/{contact_id}/tags", {"tags": tags})
