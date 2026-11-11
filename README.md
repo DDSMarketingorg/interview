@@ -156,6 +156,12 @@ you run before shipping, and how do you roll back?
 1. Your code and tests, with a short way to run them (one command).
 2. `NOTES.md`, at most about two pages: your ranked problem list (Part 1), and
    your answers to Parts 2 to 5.
+3. **Your AI session logs.** Export the chats or transcripts from whatever
+   tools you used (Claude Code, Cursor, Codex, ChatGPT...) and include them
+   unedited in an `ai-logs/` folder. Commit as you go rather than in one
+   commit at the end. We want to see how you work with these tools: what you
+   asked, what you accepted, what you rejected and why. Heavy AI use is fine;
+   we are judging the judgment, not the typing.
 
 ## Submission
 
