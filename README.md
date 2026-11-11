@@ -163,5 +163,5 @@ you run before shipping, and how do you roll back?
 **private** repository with your solution and add the GitHub user we send you,
 or send a zip by email.
 
-**Deadline:** 3 days after you receive this exercise. Plan on about 3 hours of
+**Deadline:** 12 hours after you receive this exercise. Plan on about 3 hours of
 work. A 30-minute follow-up call reviews it with you.
