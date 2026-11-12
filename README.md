@@ -156,12 +156,10 @@ you run before shipping, and how do you roll back?
 1. Your code and tests, with a short way to run them (one command).
 2. `NOTES.md`, at most about two pages: your ranked problem list (Part 1), and
    your answers to Parts 2 to 5.
-3. **Your AI session logs.** Export the chats or transcripts from whatever
-   tools you used (Claude Code, Cursor, Codex, ChatGPT...) and include them
-   unedited in an `ai-logs/` folder. Commit as you go rather than in one
-   commit at the end. We want to see how you work with these tools: what you
-   asked, what you accepted, what you rejected and why. Heavy AI use is fine;
-   we are judging the judgment, not the typing.
+3. **AI decisions**, a short section in `NOTES.md`: three to five suggestions
+   from your AI tools that you accepted or rejected, and why. Exported chat
+   logs are welcome but optional. Heavy AI use is fine; we are judging the
+   judgment, not the typing.
 
 ## Submission
 
@@ -169,5 +167,6 @@ you run before shipping, and how do you roll back?
 **private** repository with your solution and add the GitHub user we send you,
 or send a zip by email to sepi@vdsupport.com.
 
-**Deadline:** 12 hours after you receive this exercise. Plan on about 3 hours of
-work. A 30-minute follow-up call reviews it with you.
+**Deadline:** 72 hours after you receive this exercise. Plan on about 3 hours of
+work. A 60-minute follow-up call reviews it with you, including a small live
+change to your code.
