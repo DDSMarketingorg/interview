@@ -167,7 +167,7 @@ you run before shipping, and how do you roll back?
 
 **Do not open a pull request on this repository; it is public.** Create a
 **private** repository with your solution and add the GitHub user we send you,
-or send a zip by email.
+or send a zip by email to sepi@vdsupport.com.
 
 **Deadline:** 12 hours after you receive this exercise. Plan on about 3 hours of
 work. A 30-minute follow-up call reviews it with you.
